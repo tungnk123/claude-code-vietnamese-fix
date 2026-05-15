@@ -24,11 +24,30 @@ from pathlib import Path
 from datetime import datetime
 
 PATCH_MARKER = "/* Vietnamese IME fix */"
+PATCH_MARKER_BYTES = PATCH_MARKER.encode("utf-8")
 DEL_CHAR = chr(127)  # 0x7F - character used by Vietnamese IME for backspace
+OLD_BUG_PATTERN = f'.includes("{DEL_CHAR}")'
 
 
-def find_cli_js():
-    """Auto-detect Claude Code npm cli.js location."""
+def npm_global_roots():
+    """Return likely global npm node_modules roots."""
+    roots = []
+    try:
+        result = subprocess.run(
+            ["npm", "root", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            roots.append(Path(result.stdout.strip()))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return roots
+
+
+def find_claude_targets():
+    """Auto-detect Claude Code install files, old cli.js first."""
     home = Path.home()
     is_windows = platform.system() == 'Windows'
 
@@ -45,20 +64,70 @@ def find_cli_js():
             Path('/opt/homebrew/lib/node_modules'),
         ]
 
+    search_dirs.extend(npm_global_roots())
+    search_dirs = list(dict.fromkeys(d for d in search_dirs if str(d)))
+
+    cli_targets = []
+    native_targets = []
+
     for d in search_dirs:
         if d.exists():
             for cli_js in d.rglob('*/@anthropic-ai/claude-code/cli.js'):
-                return str(cli_js)
+                cli_targets.append(cli_js)
+            for native in d.rglob('*/@anthropic-ai/claude-code/bin/claude.exe'):
+                native_targets.append(native)
+            for native in d.rglob('*/@anthropic-ai/claude-code-*/claude*'):
+                if native.is_file():
+                    native_targets.append(native)
+
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        native_targets.append(Path(claude_bin))
+        try:
+            resolved = Path(claude_bin).resolve()
+            native_targets.append(resolved)
+        except OSError:
+            pass
+
+    versions_dir = home / ".local" / "share" / "claude" / "versions"
+    if versions_dir.exists():
+        native_targets.extend(p for p in versions_dir.iterdir() if p.is_file())
+
+    targets = cli_targets + native_targets
+    seen = set()
+    unique = []
+    for target in targets:
+        key = str(target)
+        if key not in seen:
+            seen.add(key)
+            unique.append(target)
+    return [str(target) for target in unique]
+
+
+def find_cli_js():
+    """Auto-detect Claude Code patch target."""
+    targets = find_claude_targets()
+    if targets:
+        return targets[0]
 
     raise FileNotFoundError(
-        "Không tìm thấy Claude Code npm.\n"
-        "Cài đặt trước: npm install -g @anthropic-ai/claude-code"
+        "Không tìm thấy Claude Code.\n"
+        "Cài đặt trước: npm install -g @anthropic-ai/claude-code hoặc chạy claude installer."
     )
+
+
+def is_binary_file(file_path):
+    """Return True when the target looks like a native executable."""
+    with open(file_path, "rb") as f:
+        chunk = f.read(4096)
+    if b"\0" in chunk:
+        return True
+    return chunk.startswith((b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\x7fELF", b"MZ"))
 
 
 def find_bug_block(content):
     """Find the if-block containing the Vietnamese IME bug pattern."""
-    pattern = f'.includes("{DEL_CHAR}")'
+    pattern = OLD_BUG_PATTERN
     idx = content.find(pattern)
 
     if idx == -1:
@@ -159,6 +228,42 @@ def find_latest_backup(file_path):
     return backups[0]
 
 
+def inspect_native_binary(file_path):
+    """Detect latest native Claude Code binaries without trying to rewrite them."""
+    with open(file_path, "rb") as f:
+        content = f.read()
+
+    if PATCH_MARKER_BYTES in content:
+        print("Đã patch trước đó.")
+        return 0
+
+    old_pattern = OLD_BUG_PATTERN.encode("utf-8")
+    if old_pattern in content and b"deleteTokenBefore" in content:
+        print(
+            "Phát hiện Claude Code native binary có bug pattern cũ, nhưng không thể patch an toàn.",
+            file=sys.stderr,
+        )
+        print(
+            "Bản Claude Code mới đóng gói thành executable native; ghi đè JS trong binary có thể làm hỏng file.",
+            file=sys.stderr,
+        )
+        print(
+            "Hãy dùng bản npm cli.js cũ hơn, hoặc chờ patcher binary-safe khi có format ổn định.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if b"handleKeyDown" in content or b"deleteTokenBefore" in content:
+        print("Đã phát hiện Claude Code native binary mới.")
+        print("Không tìm thấy bug block .includes(\"\\x7f\") cũ; không cần patch.")
+        print("Nếu vẫn bị lỗi gõ tiếng Việt, báo issue kèm version Claude Code và hệ điều hành.")
+        return 0
+
+    print("Đây là file binary và không nhận ra cấu trúc Claude Code.", file=sys.stderr)
+    print("Không patch để tránh làm hỏng executable.", file=sys.stderr)
+    return 1
+
+
 def patch(file_path):
     """Apply Vietnamese IME fix to cli.js."""
     print(f"-> File: {file_path}")
@@ -166,6 +271,9 @@ def patch(file_path):
     if not os.path.exists(file_path):
         print(f"Lỗi: File không tồn tại: {file_path}", file=sys.stderr)
         return 1
+
+    if is_binary_file(file_path):
+        return inspect_native_binary(file_path)
 
     # Read
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -236,6 +344,7 @@ def show_help():
     print("")
     print("Sử dụng:")
     print("  python3 patcher.py              Tự động phát hiện và fix")
+    print("  python3 patcher.py --auto       Tự động phát hiện và fix")
     print("  python3 patcher.py --restore    Khôi phục từ backup")
     print("  python3 patcher.py --path FILE  Fix file cụ thể")
     print("  python3 patcher.py --help       Hiển thị hướng dẫn")
@@ -249,6 +358,9 @@ def main():
     if '--help' in args or '-h' in args:
         show_help()
         return 0
+
+    if '--auto' in args:
+        args.remove('--auto')
 
     # Parse --restore flag
     if '--restore' in args:

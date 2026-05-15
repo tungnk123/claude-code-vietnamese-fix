@@ -1,6 +1,11 @@
 # Claude Code Vietnamese IME Fix
 
-Fix lỗi gõ tiếng Việt trong Claude Code CLI với các bộ gõ OpenKey, EVKey, PHTV, Unikey... Hỗ trợ macOS, Linux và Windows (npm).
+Fix lỗi gõ tiếng Việt trong Claude Code CLI với các bộ gõ OpenKey, EVKey, PHTV, Unikey... Hỗ trợ macOS, Linux và Windows.
+
+Patcher hiện hỗ trợ 2 kiểu Claude Code:
+
+- Bản cũ dùng `cli.js`: tự động patch bug block.
+- Bản mới dùng native binary: tự động phát hiện layout mới và không ghi đè binary nếu bug block cũ không còn tồn tại.
 
 ## Vấn đề
 
@@ -44,6 +49,7 @@ python ~\.claude-vn-fix\patcher.py
 
 ```bash
 python3 patcher.py              # Tự động phát hiện và fix
+python3 patcher.py --auto       # Tương tự lệnh trên
 python3 patcher.py --restore    # Khôi phục từ backup
 python3 patcher.py --path FILE  # Fix file cụ thể
 python3 patcher.py --help       # Hiển thị hướng dẫn

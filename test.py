@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""
-Claude Code Vietnamese IME Fix - Test Runner
-
-Auto-downloads latest 3 npm versions, patches, verifies --version works.
-"""
+"""Claude Code Vietnamese IME Fix - Test Runner."""
 
 import json
+import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -21,6 +19,7 @@ GREEN = "\033[0;32m"
 RED = "\033[0;31m"
 BLUE = "\033[0;34m"
 NC = "\033[0m"
+LEGACY_JS_VERSION = "2.1.96"
 
 
 def get_latest_versions(count=3):
@@ -38,26 +37,77 @@ def get_latest_versions(count=3):
     return sorted(versions, key=semver_key, reverse=True)[:count]
 
 
-def download_npm(version):
-    """Download npm package and extract cli.js."""
-    version_dir = SOURCES_DIR / f"v{version}"
+def safe_extract_package(tar, destination):
+    """Extract package/* entries without requiring Python 3.12's filter arg."""
+    destination = destination.resolve()
+    for member in tar.getmembers():
+        if not member.name.startswith("package/"):
+            continue
+        relative = member.name[8:]
+        if not relative:
+            continue
+        target = (destination / relative).resolve()
+        if destination not in target.parents and target != destination:
+            raise RuntimeError(f"unsafe tar entry: {member.name}")
+        member.name = relative
+        tar.extract(member, destination)
 
+
+def platform_native_package(version):
+    """Return the current platform's native Claude Code package name."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    elif machine in ("x86_64", "amd64"):
+        arch = "x64"
+    else:
+        raise RuntimeError(f"unsupported test arch: {machine}")
+
+    if system == "darwin":
+        key = f"darwin-{arch}"
+    elif system == "linux":
+        key = f"linux-{arch}"
+    elif system == "windows":
+        key = f"win32-{arch}"
+    else:
+        raise RuntimeError(f"unsupported test platform: {system}")
+
+    return f"@anthropic-ai/claude-code-{key}@{version}"
+
+
+def extract_npm_package(package_spec, destination):
+    """Download an npm package and extract it into destination."""
     with tempfile.TemporaryDirectory() as temp_dir:
         subprocess.run(
-            ["npm", "pack", f"@anthropic-ai/claude-code@{version}"],
-            cwd=temp_dir, capture_output=True, timeout=120
+            ["npm", "pack", package_spec],
+            cwd=temp_dir, capture_output=True, timeout=120, check=True
         )
         tarball = list(Path(temp_dir).glob("*.tgz"))[0]
 
-        version_dir.mkdir(parents=True, exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True)
         with tarfile.open(tarball, "r:gz") as tar:
-            for member in tar.getmembers():
-                if member.name.startswith("package/"):
-                    member.name = member.name[8:]
-                    if member.name:
-                        tar.extract(member, version_dir, filter="data")
+            safe_extract_package(tar, destination)
 
-    return version_dir / "cli.js"
+
+def download_npm(version):
+    """Download Claude Code and return (target path, package kind)."""
+    version_dir = SOURCES_DIR / f"v{version}"
+    extract_npm_package(f"@anthropic-ai/claude-code@{version}", version_dir)
+
+    cli_js = version_dir / "cli.js"
+    if cli_js.exists():
+        return cli_js, "cli-js"
+
+    native_dir = version_dir / "native"
+    extract_npm_package(platform_native_package(version), native_dir)
+    binary = native_dir / ("claude.exe" if platform.system() == "Windows" else "claude")
+    if not binary.exists():
+        raise RuntimeError(f"native binary not found for {version}")
+    if platform.system() != "Windows":
+        os.chmod(binary, 0o755)
+    return binary, "native"
 
 
 def run_patcher(args):
@@ -69,12 +119,10 @@ def run_patcher(args):
     return result.returncode == 0, result.stdout, result.stderr
 
 
-def verify_runs(file_path):
-    """Verify patched cli.js runs with --version."""
-    result = subprocess.run(
-        ["node", str(file_path), "--version"],
-        capture_output=True, text=True, timeout=10
-    )
+def verify_runs(file_path, kind):
+    """Verify target runs with --version."""
+    cmd = ["node", str(file_path), "--version"] if kind == "cli-js" else [str(file_path), "--version"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     return result.returncode == 0, result.stdout.strip()
 
 
@@ -129,6 +177,8 @@ def main():
     # Get versions
     print(f"{BLUE}-> Getting latest versions...{NC}")
     versions = get_latest_versions(3)
+    if LEGACY_JS_VERSION not in versions:
+        versions.append(LEGACY_JS_VERSION)
     print(f"   {', '.join(versions)}")
     print()
 
@@ -139,11 +189,11 @@ def main():
         print(f"   downloading...", end=" ", flush=True)
 
         try:
-            cli_js = download_npm(version)
+            target, kind = download_npm(version)
 
             # Test patch
             print("patch...", end=" ", flush=True)
-            ok, stdout, stderr = run_patcher(["--path", str(cli_js)])
+            ok, stdout, stderr = run_patcher(["--path", str(target)])
             if not ok:
                 print(f"{RED}✗{NC} Patch failed: {stderr}")
                 results.append(("patch", version, False))
@@ -151,15 +201,24 @@ def main():
 
             # Verify --version
             print("verify...", end=" ", flush=True)
-            ok, output = verify_runs(cli_js)
+            ok, output = verify_runs(target, kind)
             if not ok:
                 print(f"{RED}✗{NC} --version failed")
                 results.append(("verify", version, False))
                 continue
 
+            if kind == "native":
+                if "không cần patch" not in stdout.lower():
+                    print(f"{RED}✗{NC} native detection message missing")
+                    results.append(("native", version, False))
+                    continue
+                print(f"{GREEN}✓{NC} native {output}")
+                results.append(("native", version, True))
+                continue
+
             # Verify fix logic (backspace + insert)
             print("logic...", end=" ", flush=True)
-            ok, detail = verify_fix_logic(cli_js)
+            ok, detail = verify_fix_logic(target)
             if not ok:
                 print(f"{RED}✗{NC} {detail}")
                 results.append(("logic", version, False))
@@ -167,7 +226,7 @@ def main():
 
             # Test double-patch
             print("double-patch...", end=" ", flush=True)
-            ok, stdout, _ = run_patcher(["--path", str(cli_js)])
+            ok, stdout, _ = run_patcher(["--path", str(target)])
             if "Đã patch" not in stdout:
                 print(f"{RED}✗{NC} double-patch not detected")
                 results.append(("double", version, False))
@@ -175,7 +234,7 @@ def main():
 
             # Test restore
             print("restore...", end=" ", flush=True)
-            ok, _, stderr = run_patcher(["--restore", "--path", str(cli_js)])
+            ok, _, stderr = run_patcher(["--restore", "--path", str(target)])
             if not ok:
                 print(f"{RED}✗{NC} restore failed: {stderr}")
                 results.append(("restore", version, False))
