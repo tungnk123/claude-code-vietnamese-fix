@@ -3,12 +3,12 @@
 # Clone repo va tu dong chay fix
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/manhit96/claude-code-vietnamese-fix/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/tungnk123/claude-code-vietnamese-fix/main/install.ps1 | iex
 #
 
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = "https://github.com/manhit96/claude-code-vietnamese-fix.git"
+$RepoUrl = "https://github.com/tungnk123/claude-code-vietnamese-fix.git"
 $InstallDir = Join-Path $env:USERPROFILE ".claude-vn-fix"
 
 Write-Host ""
@@ -43,6 +43,7 @@ if (-not $PythonCmd) {
 Write-Host "-> Cai dat vao $InstallDir..."
 if (Test-Path $InstallDir) {
     Set-Location $InstallDir
+    try { git remote set-url origin $RepoUrl 2>&1 | Out-Null } catch {}
     try { git pull origin main 2>&1 | Out-Null } catch {}
 } else {
     git clone --depth 1 $RepoUrl $InstallDir

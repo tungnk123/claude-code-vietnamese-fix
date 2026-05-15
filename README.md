@@ -22,13 +22,13 @@ Lần đầu chạy sẽ **tự động fix** luôn.
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/manhit96/claude-code-vietnamese-fix/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tungnk123/claude-code-vietnamese-fix/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/manhit96/claude-code-vietnamese-fix/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/tungnk123/claude-code-vietnamese-fix/main/install.ps1 | iex
 ```
 
 ## Sau khi update Claude Code
